@@ -1,40 +1,48 @@
-from langchain_core.tools import tool
+import logging
 
 
-@tool
-def send_email(
+logger = logging.getLogger(
+    __name__
+)
+
+
+async def send_email_tool(
     recipient: str,
     subject: str,
-    body: str
+    body: str,
 ):
-
     """
-    Demo email tool.
+    Actually sends the email.
 
-    Real email sending should only happen
-    after approval.
+    This function must ONLY be called
+    after human approval.
     """
 
-    return (
-        "EMAIL SENT (DEMO)\n"
-        f"Recipient: {recipient}\n"
-        f"Subject: {subject}\n"
-        f"Body length: {len(body)}"
+    logger.info(
+        "Sending email to %s",
+        recipient,
     )
 
+    # -----------------------------------------------------
+    # Put your actual email provider here.
+    #
+    # Example:
+    #
+    # SMTP
+    # Gmail API
+    # Outlook API
+    # Resend
+    # SendGrid
+    # etc.
+    # -----------------------------------------------------
 
-@tool
-def publish_report(
-    title: str,
-    body: str
-):
+    # result = await email_provider.send(...)
 
-    """
-    Demo publishing tool.
-    """
+    result = {
+        "success": True,
+        "recipient": recipient,
+        "subject": subject,
+        "body": body,
+    }
 
-    return (
-        "REPORT PUBLISHED (DEMO)\n"
-        f"Title: {title}\n"
-        f"Length: {len(body)}"
-    )
+    return result

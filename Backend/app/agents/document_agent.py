@@ -1,4 +1,6 @@
 from langchain_core.messages import HumanMessage
+import logging
+
 
 from app.agents.llm import llm
 from app.tools.document import read_document

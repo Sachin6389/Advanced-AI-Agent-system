@@ -18,6 +18,7 @@ from app.agents.report import (
     reporter_agent
 )
 from app.agents.document_agent import(document_agent)
+from app.agents.email_agent import (email_agent)
 
 
 async def planner_node(
@@ -76,6 +77,12 @@ async def reporter_node(
 ):
 
     return await reporter_agent(
+        state
+    )
+async def email_node(
+    state
+):
+    return await email_agent(
         state
     )
 

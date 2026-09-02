@@ -5,6 +5,9 @@ from app.configuration import settings
 from app.API.health_routes import router as health_router
 from app.API.chat_routes import router as chat_router
 from app.API.approval_routes import router as approval_router
+from app.logging_configuration import logging_setup
+
+logging_setup()
 
 
 app = FastAPI(

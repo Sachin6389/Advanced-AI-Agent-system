@@ -1,10 +1,12 @@
 from app.agents.llm import llm
 from app.tools.calculator import calculator
+import logging
 
 
 async def analyst_agent(
     state: dict
 ):
+    logger=logging.getLogger(__name__)
 
     research = state.get(
         "research",
@@ -32,12 +34,13 @@ arithmetic is required.
 
 Do not invent information.
 """
-
+    logger.info("Start the Analyst")
     response = await llm.bind_tools(
         [calculator]
     ).ainvoke(
         prompt
     )
+    logger.info("Completed the Analyst")
 
     return {
 

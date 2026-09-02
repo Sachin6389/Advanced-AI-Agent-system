@@ -1,109 +1,116 @@
+
+import logging
+
 from fastapi import (
     APIRouter,
+    HTTPException,
     Depends,
-    HTTPException
-)
-
-from app.schemas.approval import (
-    ApprovalDecision
-)
-
-from app.security.auth import (
-    get_current_user
-)
-
-from app.checkpoints.database import (
-    CheckpointDB
 )
 
 from app.approval.approval_maneger import (
-    ApprovalManager
+    ApprovalManager,
+)
+
+from app.checkpoints.database import (
+    CheckpointDB,
 )
 
 from app.configuration import (
-    settings
+    settings,
+)
+from app.security.auth import(get_current_user)
+
+from app.schemas.approval import (
+    ApprovalDecisionRequest,
+    ApprovalDecisionResponse,
 )
 
-from app.tools.emails import (
-    send_email,
-    publish_report
+from app.workflows.email_workflow import (
+    execute_approved_email,
 )
 
+
+# =========================================================
+# Logger
+# =========================================================
+
+logger = logging.getLogger(
+    __name__
+)
+
+
+# =========================================================
+# Router
+# =========================================================
 
 router = APIRouter(
     prefix="/approval",
-    tags=["Human Approval"]
+    tags=["Approval"],
 )
 
+
+# =========================================================
+# Database
+# =========================================================
 
 db = CheckpointDB(
     settings.database_path
 )
 
-manager = ApprovalManager(
+
+# =========================================================
+# Approval Manager
+# =========================================================
+
+approval_manager = ApprovalManager(
     db
 )
 
 
-@router.get(
-    "/{session_id}"
-)
-async def get_approval(
-
-    session_id: str,
-
-    current_user=Depends(
-        get_current_user
-    )
-
-):
-
-    state = db.load_state(
-        session_id
-    )
-
-    if (
-        not state
-        or state.get("user_id")
-        != current_user["user_id"]
-    ):
-
-        raise HTTPException(
-            status_code=404,
-            detail="Session not found"
-        )
-
-
-    return (
-        manager.get(
-            session_id
-        )
-        or
-        {
-            "status": "none"
-        }
-    )
-
+# =========================================================
+# Decide Approval
+# =========================================================
 
 @router.post(
-    "/{session_id}"
+        "",
+    response_model=ApprovalDecisionResponse
 )
-async def decide(
-
-    session_id: str,
-
-    decision: ApprovalDecision,
-
+async def decide_approval(
+    request: ApprovalDecisionRequest,
     current_user=Depends(
         get_current_user
     )
-
 ):
 
-    state = db.load_state(
-        session_id
-    )
+    # =====================================================
+    # 1. Validate decision
+    # =====================================================
 
+    decision = request.decision.strip().lower()
+
+    if decision not in {
+        "accept",
+        "approve",
+        "reject",
+        "rejected",
+    }:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Invalid decision. "
+                "Use 'accept' or 'reject'."
+            ),
+        )
+
+    # Normalize decision
+    approved = decision in {
+        "accept",
+        "approve",
+    }
+
+    state = db.load_state(
+        request.session_id
+    )
     if (
         not state
         or state.get("user_id")
@@ -115,161 +122,149 @@ async def decide(
             detail="Session not found"
         )
 
+    # =====================================================
+    # 2. Get approval from DB
+    # =====================================================
 
-    approval = manager.get(
-        session_id
+    approval = approval_manager.get(
+        request.session_id
     )
 
-
-    if (
-        not approval
-        or approval.get("status")
-        != "pending"
-    ):
-
+    if not approval:
         raise HTTPException(
-            status_code=409,
-            detail=(
-                "No pending approval"
-            )
+            status_code=404,
+            detail="Approval not found.",
         )
 
 
-    approval = manager.decide(
+    # =====================================================
+    # 5. Verify pending status
+    # =====================================================
 
-        session_id,
+    if approval.get("status") != "pending":
 
-        decision.approved,
-
-        decision.comment
-
-    )
-
-
-    if not decision.approved:
-
-        state[
-            "approval_status"
-        ] = "rejected"
-
-        state[
-            "status"
-        ] = "completed"
-
-        state[
-            "report"
-        ] = (
-            state.get(
-                "report",
-                ""
-            )
-            +
-            "\n\n"
-            "[Human approval rejected "
-            "the sensitive action.]"
+        return ApprovalDecisionResponse(
+            success=False,
+            session_id=request.session_id,
+            status=approval.get(
+                "status",
+                "unknown",
+            ),
+            message=(
+                "This approval has already "
+                "been processed."
+            ),
+            approval=approval,
         )
 
-        db.save_state(
-            session_id,
-            state
-        )
-
-        return {
-
-            "status": "rejected",
-
-            "session_id":
-                session_id
-
-        }
-
-
-    action = approval[
-        "action"
-    ]
-
-    payload = approval[
-        "payload"
-    ]
-
+    # =====================================================
+    # 6. Save user decision
+    # =====================================================
 
     try:
 
-        if action == "send_email":
-
-            result = send_email.invoke(
-                payload
+        updated_approval = (
+            approval_manager.decide(
+                session_id=request.session_id,
+                approved=approved,
+                comment=None,
             )
-
-        elif action == "publish_report":
-
-            result = (
-                publish_report.invoke(
-                    payload
-                )
-            )
-
-        else:
-
-            raise ValueError(
-                f"Unsupported action: {action}"
-            )
-
-
-        state[
-            "approval_status"
-        ] = "approved"
-
-
-        state[
-            "status"
-        ] = "completed"
-
-
-        state[
-            "tool_result"
-        ] = result
-
-
-        db.save_state(
-            session_id,
-            state
         )
-
-
-        return {
-
-            "status": "approved",
-
-            "action": action,
-
-            "tool_result":
-                result
-
-        }
-
 
     except Exception as exc:
 
-        state.setdefault(
-            "errors",
-            []
-        ).append(
-            str(exc)
+        logger.exception(
+            "Failed to save approval decision: %s",
+            exc,
         )
-
-        state[
-            "status"
-        ] = "failed"
-
-
-        db.save_state(
-            session_id,
-            state
-        )
-
 
         raise HTTPException(
             status_code=500,
-            detail=str(exc)
+            detail="Failed to save approval decision.",
         )
+
+    # =====================================================
+    # 7. REJECT
+    # =====================================================
+
+    if not approved:
+
+        logger.info(
+            "Email approval rejected: session=%s",
+            request.session_id,
+        )
+
+        return ApprovalDecisionResponse(
+            success=True,
+            session_id=request.session_id,
+            status="rejected",
+            message=(
+                " ❌ Email was rejected. "
+                "The email was not sent."
+            ),
+            approval=updated_approval,
+        )
+
+    # =====================================================
+    # 8. ACCEPT
+    # =====================================================
+
+    try:
+
+        email_result = (
+            await execute_approved_email(
+                session_id=request.session_id,
+            )
+        )
+
+    except PermissionError as exc:
+
+        logger.warning(
+            "Email execution blocked: %s",
+            exc,
+        )
+
+        raise HTTPException(
+            status_code=403,
+            detail=str(exc),
+        )
+
+    except ValueError as exc:
+
+        logger.warning(
+            "Invalid approved email: %s",
+            exc,
+        )
+
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        )
+
+    except Exception as exc:
+
+        logger.exception(
+            "Approved email execution failed: %s",
+            exc,
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to execute approved email.",
+        )
+
+    # =====================================================
+    # 9. Email successfully sent
+    # =====================================================
+
+    return ApprovalDecisionResponse(
+        success=True,
+        session_id=request.session_id,
+        status="email_sent",
+        message=(
+            " ✅ Email approval accepted and "
+            "email was sent successfully."
+        ),
+        approval=updated_approval,
+    )
+

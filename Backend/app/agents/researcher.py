@@ -1,26 +1,65 @@
+
+import logging
+
 from langchain_core.messages import (
     HumanMessage,
-    SystemMessage
+    SystemMessage,
 )
 
-from app.agents.llm import llm
-from app.tools.search import web_search
 from app.mcp.client import MCPResearchClient
 
 
+logger = logging.getLogger(__name__)
+
+
 async def researcher_agent(
-    state: dict
+    state: dict,
 ):
 
-    query = state["query"]
+    query = state.get(
+        "query",
+        "",
+    ).strip()
 
-    # --------------------------------
-    # MCP Research
-    # --------------------------------
+    if not query:
+
+        return {
+            "research": "",
+            "sources": [],
+            "messages": [],
+            "status": "research_failed",
+            "error": "Query is empty.",
+        }
+
+    # ============================================================
+    # MESSAGE HISTORY
+    # ============================================================
+
+    messages = list(
+        state.get(
+            "messages",
+            [],
+        )
+    )
+
+    # Save user message
+    messages.append(
+        HumanMessage(
+            content=query
+        )
+    )
+
+    # ============================================================
+    # MCP RESEARCH
+    # ============================================================
 
     mcp_results = ""
 
     try:
+
+        logger.info(
+            "Starting Research MCP"
+        )
 
         client = MCPResearchClient()
 
@@ -28,110 +67,112 @@ async def researcher_agent(
             query
         )
 
-    except Exception as exc:
-
-        mcp_results = (
-            f"MCP unavailable: {exc}"
+        logger.info(
+            "Research MCP completed successfully"
         )
 
-    # --------------------------------
-    # Tool Calling
-    # --------------------------------
+    except Exception as exc:
 
-    research_llm = llm.bind_tools(
-        [web_search]
-    )
+        logger.exception(
+            "Research MCP failed: %s",
+            exc,
+        )
 
-    prompt = f"""
-You are the Research Agent.
+        return {
+            "research": "",
+            "sources": [],
+            "messages": messages,
+            "status": "research_failed",
+            "error": f"MCP unavailable: {exc}",
+        }
 
-Research this request:
+    # ============================================================
+    # VALIDATE MCP RESULT
+    # ============================================================
 
-{query}
+    if not mcp_results:
 
-MCP Research:
+        logger.warning(
+            "Research MCP returned empty result"
+        )
 
-{mcp_results}
+        return {
+            "research": "",
+            "sources": [],
+            "messages": messages,
+            "status": "research_failed",
+            "error": "Research MCP returned no results.",
+        }
 
-Use web_search if MCP research
-is missing or incomplete.
+    # ============================================================
+    # SAVE MCP RESULT AS ASSISTANT MESSAGE
+    # ============================================================
 
-Prefer reliable and recent sources.
-
-Return findings and source URLs.
-Do not invent facts.
-"""
-
-    response = await research_llm.ainvoke(
-        [
-            SystemMessage(
-                content=(
-                    "You are a careful "
-                    "research agent."
-                )
-            ),
-            HumanMessage(
-                content=prompt
+    messages.append(
+        SystemMessage(
+            content=(
+                "Research result retrieved from "
+                "the Research MCP server."
             )
-        ]
+        )
     )
 
-    tool_results = []
+    messages.append(
+        HumanMessage(
+            content=mcp_results
+        )
+    )
 
-    if response.tool_calls:
+    # ============================================================
+    # EXTRACT SOURCES
+    # ============================================================
 
-        for call in response.tool_calls:
+    sources = extract_sources(
+        [mcp_results]
+    )
 
-            if (
-                call["name"]
-                == "web_search"
-            ):
+    # ============================================================
+    # FINAL RESEARCH
+    # ============================================================
 
-                result = (
-                    web_search.invoke(
-                        call["args"]
-                    )
-                )
+    research = mcp_results
 
-                tool_results.append(
-                    result
-                )
-
-    parts = [
-        mcp_results,
-        response.content,
-        *tool_results
-    ]
-
-    research = "\n\n".join(
-        part
-        for part in parts
-        if part
+    logger.info(
+        "Research completed with %s sources",
+        len(sources),
     )
 
     return {
-
         "research": research,
-
-        "sources": extract_sources(
-            parts
-        ),
-
-        "status":
-            "research_completed"
-
+        "sources": sources,
+        "status": "research_completed",
     }
 
 
+# ================================================================
+# SOURCE EXTRACTION
+# ================================================================
+
 def extract_sources(
-    results: list[str]
+    results: list[str],
 ):
+    """
+    Extract TITLE and URL blocks from MCP results.
+
+    Expected MCP format:
+
+    TITLE: Example Article
+    URL: https://example.com
+    """
 
     sources = []
 
     seen = set()
 
     for text in results:
+
+        if not text:
+            continue
 
         for block in text.split(
             "\n\n"
@@ -141,24 +182,24 @@ def extract_sources(
 
             title = next(
                 (
-                    line[7:]
+                    line[7:].strip()
                     for line in lines
                     if line.startswith(
                         "TITLE: "
                     )
                 ),
-                ""
+                "",
             )
 
             url = next(
                 (
-                    line[5:]
+                    line[5:].strip()
                     for line in lines
                     if line.startswith(
                         "URL: "
                     )
                 ),
-                ""
+                "",
             )
 
             if url and url not in seen:
@@ -168,8 +209,9 @@ def extract_sources(
                 sources.append(
                     {
                         "title": title,
-                        "url": url
+                        "url": url,
                     }
                 )
 
     return sources
+

@@ -1,9 +1,11 @@
 from app.agents.llm import llm
+import logging
 
 
 async def reporter_agent(
     state: dict
 ):
+    logger=logging.getLogger(__name__)
 
     prompt = f"""
 You are the Report Agent.
@@ -45,10 +47,12 @@ Use this structure:
 Do not fabricate facts
 or citations.
 """
+    logger.info("Start the Report Gen.")
 
     response = await llm.ainvoke(
         prompt
     )
+    logger.info("Complete the report")
 
     return {
 

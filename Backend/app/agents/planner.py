@@ -1,10 +1,12 @@
 import json
+import logging
 
 from app.agents.llm import llm
 from app.schemas.plan import Plan
 
 
 async def create_plan(query: str):
+    logger=logging.getLogger(__name__)
 
     prompt = f"""
 You are the Planning Agent.
@@ -41,6 +43,7 @@ User request:
 """
 
     try:
+        logger.info("Start the planning")
 
         response = await llm.ainvoke(
             prompt
@@ -53,6 +56,7 @@ User request:
         plan = Plan.model_validate(
             data
         )
+        logger.info("Succesfully built the plan")
 
         return [
             step.model_dump()
@@ -60,6 +64,7 @@ User request:
         ]
 
     except Exception:
+        
 
         return [
 

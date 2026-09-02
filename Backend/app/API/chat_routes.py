@@ -1,434 +1,268 @@
-from pathlib import Path
+import logging
 
-from fastapi import (
-    APIRouter,
-    Depends,
-    HTTPException
-)
+from fastapi import APIRouter, HTTPException
 
 from app.schemas.chat import (
     ChatRequest,
-    ChatResponse
-)
-
-from app.security.auth import (
-    get_current_user
-)
-
-from app.security.permission import (
-    requires_approval
-)
-
-from app.checkpoints.database import (
-    CheckpointDB
-)
-
-from app.approval.approval_maneger import (
-    ApprovalManager
-)
-
-from app.configuration import (
-    settings
+    ChatResponse,
 )
 
 from app.workflows.research_graph import (
-    build_graph
+    build_graph,
 )
 
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/chat",
-    tags=["Chat"]
+    tags=["Chat"],
 )
 
 
-db = CheckpointDB(
-    settings.database_path
-)
+# ============================================================
+# GRAPH
+# ============================================================
 
-approval_manager = ApprovalManager(
-    db
-)
+graph = build_graph()
 
+
+# ============================================================
+# CHAT
+# ============================================================
 
 @router.post(
-    "",
-    response_model=ChatResponse
+        "",
+    response_model=ChatResponse,
 )
 async def chat(
-
     request: ChatRequest,
-
-    current_user=Depends(
-        get_current_user
-    )
-
 ):
+    """
+    Main AI Agent endpoint.
 
-    if (
-        current_user["user_id"]
-        != request.user_id
-    ):
+    Flow:
 
+        Client
+          |
+          v
+        FastAPI
+          |
+          v
+        AgentState
+          |
+          v
+        LangGraph
+          |
+          v
+        Supervisor
+          |
+        +---------+----------+
+        |         |          |
+      Planner  Document    Email
+        |         |          |
+      Research    |       Email Draft
+        |         |          |
+      Analysis    |       Approval
+        |         |          |
+      Fact Check  |       Return
+        |         |
+      Reporter   |
+        |         |
+        +-----> Finish
+                  |
+                  v
+                API
+                  |
+                  v
+              ChatResponse
+
+    IMPORTANT:
+    The API does NOT perform approval logic.
+
+    Approval creation, if required, is handled by
+    the email agent / workflow.
+    """
+
+    # --------------------------------------------------------
+    # Validate request
+    # --------------------------------------------------------
+
+    if not request.message.strip():
         raise HTTPException(
-            status_code=403,
-            detail="User mismatch"
+            status_code=400,
+            detail="Message cannot be empty.",
         )
-
-
-    Path(
-        settings.reports_dir
-    ).mkdir(
-        parents=True,
-        exist_ok=True
-    )
-
-
-    Path(
-        settings.documents_dir
-    ).mkdir(
-        parents=True,
-        exist_ok=True
-    )
-
-
-    existing = db.load_state(
-        request.session_id
-    )
-
-
-    if (
-        existing
-        and existing.get("status")
-        == "awaiting_approval"
-    ):
-
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "Session is waiting "
-                "for human approval."
-            )
-        )
-
-
-    state = {
-
-        "user_id":
-            request.user_id,
-
-        "user_role":
-            current_user["role"],
-
-        "session_id":
-            request.session_id,
-
-        "query":
-            request.message,
-
-        "recipient":
-            request.recipient,
-
-        "messages":
-            existing.get(
-                "messages",
-                []
-            )
-            if existing
-            else [],
-
-        "memories":
-            existing.get(
-                "memories",
-                []
-            )
-            if existing
-            else [],
-
-        "previous_queries":
-            existing.get(
-                "previous_queries",
-                []
-            )
-            if existing
-            else [],
-
-        "errors": [],
-
-        "retry_count": 0,
-
-        "status": "started"
-
-    }
-
 
     try:
 
-        graph = build_graph()
+        # ----------------------------------------------------
+        # Build initial AgentState
+        # ----------------------------------------------------
+
+        initial_state = {
+            "user_id": request.user_id,
+            "session_id": request.session_id,
+
+            "query": request.message.strip(),
+
+            # Workflow defaults
+            "status": "started",
+            "next_agent": None,
+
+            # Planning
+            "plan": [],
+            "current_step": 0,
+
+            # Agent outputs
+            "research": "",
+            "analysis": "",
+            "fact_check": "",
+            "report": "",
+
+            # Sources
+            "sources": [],
+
+            # Memory
+            "messages": [],
+            "memories": [],
+            "previous_queries": [],
+
+            # Errors
+            "errors": [],
+            "retry_count": 0,
+
+            # Document
+            "file_path": None,
+
+            # Email
+            "email_payload": None,
+            "email_subject": None,
+            "email_body": None,
+            "email_sent": False,
+
+            # Tool
+            "tool_result": None,
+
+            # Approval state
+            #
+            # These are initialized only as state fields.
+            # The API does NOT create or process approval.
+            "approval_required": False,
+            "approval_status": None,
+            "approval_action": None,
+            "approval_reason": None,
+            "approval": None,
+        }
+
+        # ----------------------------------------------------
+        # Run LangGraph
+        # ----------------------------------------------------
+
+        logger.info(
+            "Starting workflow | user=%s session=%s",
+            request.user_id,
+            request.session_id,
+        )
 
         result = await graph.ainvoke(
-            state
+            initial_state
         )
 
-
-        # -------------------------
-        # Sensitive action detection
-        # -------------------------
-
-        message = (
-            request.message.lower()
-        )
-
-
-        wants_email = any(
-
-            phrase in message
-
-            for phrase in [
-
-                "send email",
-
-                "email the report",
-
-                "email report"
-
-            ]
-
-        )
-
-
-        wants_publish = any(
-
-            phrase in message
-
-            for phrase in [
-
-                "publish report",
-
-                "publish the report"
-
-            ]
-
-        )
-
-
-        if (
-            result.get("report")
-            and (
-                wants_email
-                or wants_publish
-            )
-        ):
-
-            action = (
-
-                "send_email"
-
-                if wants_email
-
-                else
-
-                "publish_report"
-
-            )
-
-
-            if not requires_approval(
-                action
-            ):
-
-                raise HTTPException(
-                    status_code=500,
-                    detail=(
-                        "Approval policy "
-                        "misconfigured."
-                    )
-                )
-
-
-            if (
-                action == "send_email"
-                and not request.recipient
-            ):
-
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        "recipient is required "
-                        "for email."
-                    )
-                )
-
-
-            if action == "send_email":
-
-                payload = {
-
-                    "recipient":
-                        request.recipient,
-
-                    "subject":
-                        "AI Research Agent Report",
-
-                    "body":
-                        result["report"]
-
-                }
-
-            else:
-
-                payload = {
-
-                    "title":
-                        "AI Research Agent Report",
-
-                    "body":
-                        result["report"]
-
-                }
-
-
-            approval = (
-                approval_manager.create(
-
-                    request.session_id,
-
-                    action,
-
-                    (
-                        "The agent wants to "
-                        f"perform sensitive action: "
-                        f"{action}"
-                    ),
-
-                    payload
-
-                )
-            )
-
-
-            result[
-                "approval_required"
-            ] = True
-
-
-            result[
-                "approval_status"
-            ] = "pending"
-
-
-            result[
-                "approval_action"
-            ] = action
-
-
-            result[
-                "approval_reason"
-            ] = approval[
-                "reason"
-            ]
-
-
-            result[
-                "status"
-            ] = "awaiting_approval"
-
-
-        result.setdefault(
-            "previous_queries",
-            []
-        ).append(
-            request.message
-        )
-
-
-        db.save_state(
+        logger.info(
+            "Workflow completed | user=%s session=%s status=%s",
+            request.user_id,
             request.session_id,
-            result
+            result.get("status"),
         )
 
+        # ----------------------------------------------------
+        # Determine answer
+        # ----------------------------------------------------
+
+        status = result.get(
+            "status",
+            "completed",
+        )
+
+        errors = result.get(
+            "errors",
+            [],
+        )
+
+        # ----------------------------------------------------
+        # Report / document / email response
+        # ----------------------------------------------------
+
+        answer = None
+
+        if result.get("report"):
+            answer = result["report"]
+
+        elif result.get("email_payload"):
+            email_payload = result["email_payload"]
+
+            answer = (
+                "Email draft prepared.\n\n"
+                f"Recipient: "
+                f"{email_payload.get('recipient', '')}\n\n"
+                f"Subject: "
+                f"{email_payload.get('subject', '')}\n\n"
+                f"Body:\n"
+                f"{email_payload.get('body', '')}"
+            )
+
+        elif result.get("tool_result"):
+            answer = str(
+                result["tool_result"]
+            )
+
+        elif errors:
+            answer = errors[-1]
+
+        # ----------------------------------------------------
+        # Return API response
+        # ----------------------------------------------------
 
         return ChatResponse(
 
-            session_id=
-                request.session_id,
+            session_id=request.session_id,
 
-            status=
-                result.get(
-                    "status",
-                    "completed"
-                ),
+            status=status,
 
-            answer=
-                result.get(
-                    "report"
-                ),
+            answer=answer,
 
-            plan=
-                result.get(
-                    "plan",
-                    []
-                ),
+            plan=result.get(
+                "plan",
+                [],
+            ),
 
-            sources=
-                result.get(
-                    "sources",
-                    []
-                ),
+            sources=result.get(
+                "sources",
+                [],
+            ),
 
-            approval_required=
-                result.get(
-                    "approval_required",
-                    False
-                ),
+            approval_required=result.get(
+                "approval_required",
+                False,
+            ),
 
-            approval=
-                approval_manager.get(
-                    request.session_id
-                ),
+            approval=result.get(
+                "approval"
+            ),
 
-            errors=
-                result.get(
-                    "errors",
-                    []
-                )
-
+            errors=errors,
         )
-
-
-    except HTTPException:
-
-        raise
-
 
     except Exception as exc:
 
-        state.setdefault(
-            "errors",
-            []
-        ).append(
-            str(exc)
-        )
-
-        state[
-            "status"
-        ] = "failed"
-
-
-        db.save_state(
+        logger.exception(
+            "Chat workflow failed | user=%s session=%s",
+            request.user_id,
             request.session_id,
-            state
         )
 
-
-        return ChatResponse(
-
-            session_id=
-                request.session_id,
-
-            status="failed",
-
-            errors=
-                state["errors"]
-
-        )
+        raise HTTPException(
+            status_code=500,
+            detail="AI workflow execution failed.",
+        ) from exc
