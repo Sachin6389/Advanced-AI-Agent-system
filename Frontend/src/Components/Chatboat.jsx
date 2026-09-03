@@ -75,7 +75,7 @@ function Chatboat() {
       {
         sender: "bot",
         text:
-          "👋 Hello! I'm your Advanced Research Agent. How can I help you today?",
+          "👋 Hello! I'm your Advanced AI Agent System. How can I help you today?",
       },
     ]);
 
@@ -355,7 +355,7 @@ function Chatboat() {
           font-bold
         "
       >
-        Research Agent
+        Advanced AI Agent System
       </div>
 
 
